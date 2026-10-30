@@ -1,0 +1,6 @@
+# Site block for the Caddy of the museum portal (/opt/mincult): remote.sh copies it to /opt/caddy-sites/tourism-gov.caddy,
+# with TG_DOMAIN replaced by DOMAIN. Caddy gets the Let's Encrypt certificate itself.
+TG_DOMAIN {
+	encode zstd gzip
+	reverse_proxy tg-web:80
+}

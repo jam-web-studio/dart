@@ -1,0 +1,8 @@
+export default function NotFoundPage() {
+  return (
+    <div className="container page">
+      <h1>404</h1>
+      <p>Сторінку не знайдено. <a href="/">На головну</a></p>
+    </div>
+  )
+}

@@ -1,0 +1,15 @@
+# Live server (той самий VPS, що й музейний портал). Порти 80/443 тримає Caddy музейного порталу (/opt/mincult).
+# Наш nginx нічого не публікує, а підключається до мережі mincult_default під іменем tg-web;
+# Caddy бере сайт із /opt/caddy-sites/tourism-gov.caddy.
+services:
+  tg-web:
+    ports: !reset []
+    networks:
+      default: {}
+      mincult:
+        aliases: [tg-web]
+
+networks:
+  mincult:
+    name: mincult_default
+    external: true

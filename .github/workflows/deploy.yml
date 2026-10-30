@@ -1,0 +1,94 @@
+# Deploys «Державне агентство розвитку туризму України» to the live server on every push to main (and by hand from the Actions tab).
+# Repository secrets (DEPLOY_HOST, DEPLOY_USER, DEPLOY_PORT and DOMAIN may also be repository variables):
+# DEPLOY_HOST, DEPLOY_USER (e.g. root), DEPLOY_SSH_KEY (private key), DOMAIN, ADMIN_EMAIL (optional,
+# default admin@tourism.gov.ua) and ADMIN_PASSWORD (administrator, created on the first deploy), optional DEPLOY_PORT.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency: deploy
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: api } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with: { php-version: '8.3', extensions: 'intl, zip, gd, pdo_sqlite', coverage: none }
+      - run: composer install --no-interaction --prefer-dist --no-progress
+      - run: cp .env.example .env && php artisan key:generate
+      - run: vendor/bin/pint --test
+      - run: php artisan test
+
+  web:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: web } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm ci
+      - run: npx tsc --noEmit
+
+  deploy:
+    needs: [test, web]
+    runs-on: ubuntu-latest
+    env:
+      HOST: ${{ secrets.DEPLOY_HOST || vars.DEPLOY_HOST }}
+      USER: ${{ secrets.DEPLOY_USER || vars.DEPLOY_USER || 'root' }}
+      PORT: ${{ secrets.DEPLOY_PORT || vars.DEPLOY_PORT || '22' }}
+      DOMAIN: ${{ secrets.DOMAIN || vars.DOMAIN }}
+      HAS_KEY: ${{ secrets.DEPLOY_SSH_KEY != '' }}
+    steps:
+      - name: Check secrets
+        id: check
+        run: |
+          for v in HOST DOMAIN; do [ -n "$(printenv $v)" ] && echo "$v: set" || echo "$v: MISSING"; done
+          echo "DEPLOY_SSH_KEY set: $HAS_KEY"
+          echo "ADMIN_PASSWORD set: ${{ secrets.ADMIN_PASSWORD != '' }}"
+          if [ -z "$HOST" ] || [ -z "$DOMAIN" ] || [ "$HAS_KEY" != true ]; then
+            echo "::warning::DEPLOY_HOST, DOMAIN or DEPLOY_SSH_KEY is not set, skipping deploy"; echo "go=0" >> "$GITHUB_OUTPUT"
+          else echo "go=1" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.go == '1'
+
+      # Images are built here, not on the shared VPS: image builds there ran it out of memory and froze every site on it.
+      - name: Build images
+        if: steps.check.outputs.go == '1'
+        run: |
+          docker build -t tourism-gov-app:latest ./api
+          docker build -t tourism-gov-web:latest ./web
+          docker save tourism-gov-app:latest tourism-gov-web:latest | gzip -1 > /tmp/images.tar.gz
+          ls -lh /tmp/images.tar.gz
+
+      - name: SSH key
+        if: steps.check.outputs.go == '1'
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" | tr -d '\r' > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          ssh-keygen -lf ~/.ssh/id_deploy >/dev/null || echo "::error::DEPLOY_SSH_KEY is not a valid private key"
+          ssh-keyscan -p "$PORT" "$HOST" >> ~/.ssh/known_hosts
+
+      - name: Upload code
+        if: steps.check.outputs.go == '1'
+        run: |
+          ssh -o ServerAliveInterval=30 -i ~/.ssh/id_deploy -p "$PORT" "$USER@$HOST" 'mkdir -p /opt/tourism-gov && command -v rsync >/dev/null || (apt-get update -qq && apt-get install -y -qq rsync)'
+          rsync -az --delete -e "ssh -o ServerAliveInterval=30 -i ~/.ssh/id_deploy -p $PORT" \
+            --exclude .git --exclude /.env --exclude api/.env \
+            ./ "$USER@$HOST:/opt/tourism-gov/"
+
+      - name: Upload images
+        if: steps.check.outputs.go == '1'
+        run: |
+          ssh -o ServerAliveInterval=30 -i ~/.ssh/id_deploy -p "$PORT" "$USER@$HOST" 'gunzip | docker load' < /tmp/images.tar.gz
+
+      - name: Start
+        if: steps.check.outputs.go == '1'
+        run: |
+          ssh -o ServerAliveInterval=30 -i ~/.ssh/id_deploy -p "$PORT" "$USER@$HOST" \
+            "PREBUILT=1 DOMAIN='$DOMAIN' ADMIN_EMAIL='${{ secrets.ADMIN_EMAIL }}' ADMIN_PASSWORD='${{ secrets.ADMIN_PASSWORD }}' sh /opt/tourism-gov/deploy/remote.sh"
