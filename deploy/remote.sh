@@ -54,8 +54,8 @@ $C ps
 # smoke test: first the app itself (nginx inside the project), then the public HTTPS through Caddy
 inner() { $C exec -T tg-web wget -qO /dev/null -S "http://127.0.0.1$1" 2>&1 | grep -o 'HTTP/1\.[01] [0-9]*' | tail -1 | awk '{print $2+0}'; }
 for i in $(seq 1 30); do
-  home="$(inner /)"; api="$(inner /api/v1/home)"; admin="$(inner /admin/login)"
-  echo "try $i: / -> $home, /api/v1/home -> $api, /admin/login -> $admin"
+  home="$(inner /)"; api="$(inner /api/v1/layout)"; admin="$(inner /admin/login)"
+  echo "try $i: / -> $home, /api/v1/layout -> $api, /admin/login -> $admin"
   [ "$home" = 200 ] && [ "$api" = 200 ] && [ "$admin" = 200 ] && break
   sleep 10
 done
