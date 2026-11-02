@@ -9,3 +9,8 @@
   .mission-grid .mission-item-heading,
   .mission-grid .mission-item-text { width: auto; margin-left: 0; }
 }
+
+/* Телефон: кнопка «Меню доступності» внизу праворуч, щоб не закривала заголовки й меню */
+@media screen and (max-width: 767px) {
+  #aswMenuBtn { top: auto !important; bottom: 16px !important; right: 16px !important; box-shadow: 0 2px 8px rgba(0, 0, 0, .25); }
+}

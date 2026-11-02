@@ -9,7 +9,7 @@ const ACCESSIBILITY = `${CDN}/68d55186346c926f21c73bf4_accessibility-new.txt`
 const FONTS = ['Oswald:200,300,400,500,600,700', 'Open Sans:300,300italic,400,400italic,600,600italic,700,700italic,800,800italic', 'Montserrat:100,100italic,200,200italic,300,300italic,400,400italic,500,500italic,600,600italic,700,700italic,800,800italic,900,900italic']
 
 // змінюйте разом із public/site.css, щоб браузери не тримали старий файл
-const SITE_CSS_V = '1'
+const SITE_CSS_V = '2'
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 // вміст <script>/<style> не можна обривати рядком </script>
