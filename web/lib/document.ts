@@ -8,6 +8,9 @@ const JQUERY = `https://d3e54v103j8qbb.cloudfront.net/js/jquery-3.5.1.min.dc5e7f
 const ACCESSIBILITY = `${CDN}/68d55186346c926f21c73bf4_accessibility-new.txt`
 const FONTS = ['Oswald:200,300,400,500,600,700', 'Open Sans:300,300italic,400,400italic,600,600italic,700,700italic,800,800italic', 'Montserrat:100,100italic,200,200italic,300,300italic,400,400italic,500,500italic,600,600italic,700,700italic,800,800italic,900,900italic']
 
+// змінюйте разом із public/site.css, щоб браузери не тримали старий файл
+const SITE_CSS_V = '1'
+
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 // вміст <script>/<style> не можна обривати рядком </script>
 const raw = (s: string) => s.replace(/<\/(script|style)/gi, '<\\/$1')
@@ -57,6 +60,7 @@ export function renderDocument({ lang, path, site, layout, page, canonical }: Do
 <meta content="width=device-width, initial-scale=1" name="viewport"/>${noindex ? '<meta name="robots" content="noindex, nofollow"/>' : ''}
 <link rel="canonical" href="${esc(url)}"/>
 <link href="/webflow/tourismgovua.webflow.css" rel="stylesheet" type="text/css"/>
+<link href="/site.css?v=${SITE_CSS_V}" rel="stylesheet" type="text/css"/>
 ${page.styles.map((s) => `<style>${raw(s)}</style>`).join('')}
 <link href="https://fonts.googleapis.com" rel="preconnect"/><link href="https://fonts.gstatic.com" rel="preconnect" crossorigin="anonymous"/>
 <script src="https://ajax.googleapis.com/ajax/libs/webfont/1.6.26/webfont.js" type="text/javascript"></script>

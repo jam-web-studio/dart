@@ -1,0 +1,11 @@
+/* Наші правки поверх стилів Webflow старого сайту */
+
+/* Головна: «Місія» і «Візія» в один рядок */
+@media screen and (min-width: 768px) {
+  ._3-col-grid.mission-grid { display: flex; flex-flow: row nowrap; align-items: stretch; gap: 2.5vw; }
+  ._3-col-grid.mission-grid > .gr-col-block { flex: 1 1 0; display: flex; flex-flow: column; align-items: stretch; width: auto; height: auto; }
+  .mission-grid .second-screen-img img { width: 100%; height: auto; display: block; }
+  .mission-grid .gr-2nd-col-block { width: 100%; margin-left: 0; }
+  .mission-grid .mission-item-heading,
+  .mission-grid .mission-item-text { width: auto; margin-left: 0; }
+}
