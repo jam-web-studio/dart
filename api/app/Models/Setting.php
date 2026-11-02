@@ -20,20 +20,14 @@ class Setting extends Model
     public const DEFAULTS = [
         'site_name' => 'Державне агентство розвитку туризму України',
         'site_name_en' => 'State Agency for Tourism Development of Ukraine',
-        'phone' => '',
-        'email' => '',
-        'address' => '',
-        'address_en' => '',
-        'facebook' => '',
-        'instagram' => '',
-        'youtube' => '',
-        'telegram' => '',
-        'twitter' => '',
-        'hero_title' => '',
-        'hero_text' => '',
-        'hero_image' => '',
-        'footer_text' => '',
+        'meta_description' => '',
+        'og_image' => '',
     ];
+
+    /** Шапка, підвал, віджет доступності й загальний скрипт старого сайту (HTML Webflow), шаблони сторінок записів */
+    public const LAYOUT = ['layout_header', 'layout_footer', 'layout_accessibility', 'layout_global_script', 'layout_head_styles'];
+
+    public const TEMPLATES = ['template_post', 'template_order', 'template_report'];
 
     public static function get(string $key, $default = null)
     {

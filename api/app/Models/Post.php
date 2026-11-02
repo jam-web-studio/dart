@@ -13,9 +13,9 @@ class Post extends Model
 
     protected $guarded = ['id'];
 
-    protected $attributes = ['locale' => 'uk', 'is_published' => true, 'is_featured' => false];
+    protected $attributes = ['locale' => 'uk', 'is_published' => true, 'is_featured' => false, 'is_main' => false];
 
-    protected $casts = ['is_published' => 'boolean', 'is_featured' => 'boolean', 'gallery' => 'array', 'published_at' => 'datetime'];
+    protected $casts = ['is_published' => 'boolean', 'is_featured' => 'boolean', 'is_main' => 'boolean', 'gallery' => 'array', 'published_at' => 'datetime'];
 
     public function category(): BelongsTo
     {
@@ -27,8 +27,9 @@ class Post extends Model
         $q->where('is_published', true)->where(fn ($w) => $w->whereNull('published_at')->orWhere('published_at', '<=', now()));
     }
 
+    /** Адреси як на старому сайті: /blog/{slug} */
     public function url(): string
     {
-        return Site::prefix($this->locale).'/news/'.$this->slug;
+        return Site::prefix($this->locale).'/blog/'.$this->slug;
     }
 }

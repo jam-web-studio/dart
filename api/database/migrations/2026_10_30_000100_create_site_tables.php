@@ -12,28 +12,28 @@ return new class extends Migration
             $table->string('role', 20)->default('editor')->after('email');
         });
 
-        // статичні сторінки: «Про агентство», «Структура», «Контакти»…; path = повна адреса без мови (about/structure)
+        // сторінки сайту: розмітка Webflow як є (path = адреса без мови: «licensuvannya», «departments/finances»);
+        // динамічні списки в тексті позначені <template data-collection=…> і заповнюються з бази
         Schema::create('pages', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('parent_id')->nullable()->constrained('pages')->nullOnDelete();
             $table->string('locale', 5)->default('uk');
-            $table->string('slug');
             $table->string('path');
             $table->string('title');
-            $table->text('excerpt')->nullable();
             $table->longText('body')->nullable();
-            $table->string('cover_image')->nullable();
-            $table->string('template', 30)->default('default');
+            $table->json('scripts')->nullable();
+            $table->json('styles')->nullable();
+            $table->string('wf_page', 40)->nullable(); // data-wf-page: потрібен скриптам Webflow для анімацій сторінки
             $table->boolean('is_published')->default(true);
-            $table->unsignedInteger('sort')->default(0);
-            $table->string('source_url')->nullable();
             $table->string('meta_title')->nullable();
             $table->text('meta_description')->nullable();
+            $table->string('og_image', 1000)->nullable();
+            $table->string('imported_hash', 32)->nullable();
+            $table->string('source_url')->nullable();
             $table->timestamps();
             $table->unique(['locale', 'path']);
         });
 
-        // рубрики стрічки: новини, анонси, оголошення…
+        // рубрики новин: новина, анонс
         Schema::create('categories', function (Blueprint $table) {
             $table->id();
             $table->string('locale', 5)->default('uk');
@@ -49,62 +49,41 @@ return new class extends Migration
             $table->foreignId('category_id')->nullable()->constrained()->nullOnDelete();
             $table->string('locale', 5)->default('uk');
             $table->string('slug');
-            $table->string('title');
-            $table->text('excerpt')->nullable();
+            $table->string('title', 500);
             $table->longText('body')->nullable();
-            $table->string('cover_image')->nullable();
+            $table->string('cover_image', 1000)->nullable();
             $table->json('gallery')->nullable();
             $table->timestamp('published_at')->nullable()->index();
             $table->boolean('is_published')->default(true);
-            $table->boolean('is_featured')->default(false);
-            $table->string('source_url')->nullable();
-            $table->string('meta_title')->nullable();
+            $table->boolean('is_featured')->default(false); // «Актуальні новини»
+            $table->boolean('is_main')->default(false); // «Остання новина»
+            $table->string('meta_title', 500)->nullable();
             $table->text('meta_description')->nullable();
+            $table->string('og_image', 1000)->nullable();
+            $table->string('imported_hash', 32)->nullable();
+            $table->string('source_url', 500)->nullable();
             $table->timestamps();
             $table->unique(['locale', 'slug']);
         });
 
-        // нормативні документи, звіти, плани
+        // накази (/orders/{slug}, PDF) і звіти щодо запитів на інформацію (/reports/{slug})
         Schema::create('documents', function (Blueprint $table) {
             $table->id();
+            $table->string('kind', 20)->default('order');
             $table->string('locale', 5)->default('uk');
-            $table->string('group')->nullable();
+            $table->string('slug');
             $table->string('title', 1000);
             $table->string('number')->nullable();
             $table->date('date')->nullable();
             $table->string('file')->nullable();
             $table->string('url', 2000)->nullable();
-            $table->text('description')->nullable();
+            $table->json('meta')->nullable(); // звіт: {month, year}
+            $table->integer('sort')->default(0);
             $table->boolean('is_published')->default(true);
-            $table->unsignedInteger('sort')->default(0);
+            $table->string('imported_hash', 32)->nullable();
+            $table->string('source_url', 500)->nullable();
             $table->timestamps();
-        });
-
-        // меню шапки й підвалу (дворівневе)
-        Schema::create('menu_items', function (Blueprint $table) {
-            $table->id();
-            $table->string('menu', 20)->default('header');
-            $table->string('locale', 5)->default('uk');
-            $table->foreignId('parent_id')->nullable()->constrained('menu_items')->cascadeOnDelete();
-            $table->string('label');
-            $table->string('url', 1000);
-            $table->boolean('new_tab')->default(false);
-            $table->unsignedInteger('sort')->default(0);
-            $table->timestamps();
-        });
-
-        // банери/посилання на головній (партнерські ресурси, проєкти)
-        Schema::create('banners', function (Blueprint $table) {
-            $table->id();
-            $table->string('locale', 5)->default('uk');
-            $table->string('place', 30)->default('home');
-            $table->string('title');
-            $table->text('text')->nullable();
-            $table->string('image')->nullable();
-            $table->string('url', 1000)->nullable();
-            $table->boolean('is_published')->default(true);
-            $table->unsignedInteger('sort')->default(0);
-            $table->timestamps();
+            $table->unique(['kind', 'locale', 'slug']);
         });
 
         Schema::create('settings', function (Blueprint $table) {
@@ -116,7 +95,7 @@ return new class extends Migration
 
     public function down(): void
     {
-        foreach (['settings', 'banners', 'menu_items', 'documents', 'posts', 'categories', 'pages'] as $t) {
+        foreach (['settings', 'documents', 'posts', 'categories', 'pages'] as $t) {
             Schema::dropIfExists($t);
         }
         Schema::table('users', fn (Blueprint $table) => $table->dropColumn('role'));

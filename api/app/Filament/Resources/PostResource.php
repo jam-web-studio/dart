@@ -11,7 +11,6 @@ use BackedEnum;
 use Filament\Actions\EditAction;
 use Filament\Forms\Components\DateTimePicker;
 use Filament\Forms\Components\Select;
-use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\Toggle;
 use Filament\Resources\Resource;
 use Filament\Schemas\Components\Section;
@@ -48,12 +47,12 @@ class PostResource extends Resource
                 Fields::locale(),
                 Select::make('category_id')->label('Рубрика')->relationship('category', 'name')->preload(),
                 DateTimePicker::make('published_at')->label('Дата публікації')->default(now())->native(false),
-                Textarea::make('excerpt')->label('Анонс')->rows(3)->columnSpanFull(),
                 Editor::make('body', 'news')->label('Текст')->columnSpanFull(),
                 ...Fields::image('cover_image', 'Головне фото', 'news'),
                 ...Fields::gallery('gallery', 'news'),
                 Toggle::make('is_published')->label('Опубліковано')->default(true),
-                Toggle::make('is_featured')->label('На головній у слайдері'),
+                Toggle::make('is_featured')->label('Популярні новини'),
+                Toggle::make('is_main')->label('Головна новина (вгорі сторінки новин)'),
             ])->columnSpanFull(),
             Fields::seo()->columnSpanFull(),
         ]);
@@ -68,7 +67,7 @@ class PostResource extends Resource
             TextColumn::make('published_at')->label('Дата')->dateTime('d.m.Y H:i')->sortable(),
             TextColumn::make('locale')->label('Мова')->badge(),
             ToggleColumn::make('is_published')->label('Опубл.'),
-            ToggleColumn::make('is_featured')->label('Слайдер'),
+            ToggleColumn::make('is_featured')->label('Популярна'),
         ])->filters([
             SelectFilter::make('category_id')->label('Рубрика')->relationship('category', 'name'),
             SelectFilter::make('locale')->label('Мова')->options(Site::LOCALES),

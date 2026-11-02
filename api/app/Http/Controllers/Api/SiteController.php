@@ -3,14 +3,12 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\Banner;
-use App\Models\Category;
 use App\Models\Document;
-use App\Models\MenuItem;
 use App\Models\Page;
 use App\Models\Post;
 use App\Models\Setting;
 use App\Models\Site;
+use App\Support\Webflow;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -23,100 +21,115 @@ class SiteController extends Controller
         return array_key_exists($l, Site::LOCALES) ? $l : 'uk';
     }
 
-    private function posts(string $locale)
+    /** Шапка, підвал, віджет доступності й загальний скрипт (однакові на всіх сторінках) */
+    public function layout()
     {
-        return Post::published()->where('locale', $locale)->with('category')
-            ->orderByDesc('published_at')->orderByDesc('id');
-    }
-
-    /** Шапка й підвал: меню, контакти, соцмережі (на кожній сторінці) */
-    public function layout(Request $request)
-    {
-        $l = $this->locale($request);
-
         return [
             'settings' => Setting::publicAll(),
-            'menus' => collect(MenuItem::MENUS)->keys()->mapWithKeys(fn ($m) => [$m => MenuItem::tree($m, $l)]),
-            'locales' => Site::LOCALES,
+            'header' => (string) Setting::get('layout_header', ''),
+            'footer' => (string) Setting::get('layout_footer', ''),
+            'accessibility' => (string) Setting::get('layout_accessibility', ''),
+            'global_script' => (string) Setting::get('layout_global_script', ''),
+            'head_styles' => (array) Setting::get('layout_head_styles', []),
         ];
     }
 
-    public function home(Request $request)
+    /**
+     * Готовий HTML сторінки за адресою старого сайту: «/», «licensuvannya», «blog/{slug}», «orders/{slug}», «reports/{slug}».
+     * Решта параметрів запиту — номери сторінок списків (?6f78dda3_page=2).
+     */
+    public function render(Request $request)
     {
         $l = $this->locale($request);
+        $path = trim((string) $request->query('path'), '/') ?: 'home';
+        $query = collect($request->query())->except(['path', 'locale'])->map(fn ($v) => (string) $v)->all();
+
+        if (preg_match('~^(blog|orders|reports)/([^/]+)$~', $path, $m)) {
+            return $this->record($m[1], $m[2], $l);
+        }
+
+        $page = Page::published()->where('locale', $l)->where('path', $path)->firstOrFail();
 
         return [
-            'featured' => $this->posts($l)->where('is_featured', true)->limit(5)->get()->map(fn ($p) => Present::postCard($p)),
-            'news' => $this->posts($l)->limit(9)->get()->map(fn ($p) => Present::postCard($p)),
-            'banners' => Banner::where('locale', $l)->where('is_published', true)->orderBy('sort')->get()
-                ->groupBy('place')->map(fn ($g) => $g->map(fn ($b) => Present::banner($b))->values()),
+            'type' => 'page',
+            'title' => $page->title,
+            'meta' => ['title' => $page->meta_title ?: $page->title, 'description' => $page->meta_description, 'image' => $page->og_image],
+            'wf_page' => $page->wf_page,
+            'html' => Webflow::render((string) $page->body, $l, $query),
+            'scripts' => $page->scripts ?? [],
+            'styles' => $page->styles ?? [],
+            'updated_at' => $page->updated_at?->toAtomString(),
         ];
     }
 
-    public function news(Request $request)
+    private function record(string $section, string $slug, string $l): array
     {
-        $l = $this->locale($request);
-        $q = $this->posts($l)
-            ->when($request->query('category'), fn ($q, $slug) => $q->whereHas('category', fn ($c) => $c->where('slug', $slug)))
-            ->when($request->query('q'), fn ($q, $term) => $this->match($q, ['title', 'excerpt'], $term))
-            ->paginate((int) min(48, max(1, (int) $request->query('per_page', 12))));
+        if ($section === 'blog') {
+            $post = Post::published()->where('locale', $l)->where('slug', $slug)->firstOrFail();
+            $vars = Webflow::postVars($post);
+            $meta = ['title' => $post->meta_title ?: $post->title, 'description' => $post->meta_description, 'image' => Post::mediaUrl($post->og_image ?: $post->cover_image)];
+            $tpl = Webflow::template('post');
+            $title = $post->title;
+            $updated = $post->updated_at;
+        } else {
+            $kind = $section === 'reports' ? 'report' : 'order';
+            $doc = Document::published()->where('kind', $kind)->where('locale', $l)->where('slug', $slug)->firstOrFail();
+            $vars = Webflow::documentVars($doc);
+            $meta = ['title' => $doc->title, 'description' => null, 'image' => null];
+            $tpl = Webflow::template($kind);
+            $title = $doc->title;
+            $updated = $doc->updated_at;
+        }
 
         return [
-            'data' => collect($q->items())->map(fn ($p) => Present::postCard($p)),
-            'meta' => ['page' => $q->currentPage(), 'pages' => $q->lastPage(), 'total' => $q->total()],
-            'categories' => Category::where('locale', $l)->orderBy('sort')->get(['slug', 'name']),
+            'type' => $section,
+            'title' => $title,
+            'meta' => $meta,
+            'wf_page' => $tpl['wf_page'] ?? null,
+            'html' => Webflow::fill((string) ($tpl['body'] ?? ''), $vars),
+            'scripts' => $tpl['scripts'] ?? [],
+            'styles' => $tpl['styles'] ?? [],
+            'updated_at' => $updated?->toAtomString(),
         ];
-    }
-
-    public function post(Request $request, string $slug)
-    {
-        $l = $this->locale($request);
-        $post = $this->posts($l)->where('slug', $slug)->firstOrFail();
-
-        return [
-            'data' => Present::post($post),
-            'related' => $this->posts($l)->where('id', '!=', $post->id)->limit(3)->get()->map(fn ($p) => Present::postCard($p)),
-        ];
-    }
-
-    /** Сторінка за повною адресою: /api/v1/pages?path=about/structure */
-    public function page(Request $request)
-    {
-        $page = Page::published()->where('locale', $this->locale($request))
-            ->where('path', trim((string) $request->query('path'), '/'))->firstOrFail();
-
-        return ['data' => Present::page($page)];
-    }
-
-    public function documents(Request $request)
-    {
-        $docs = Document::where('is_published', true)->where('locale', $this->locale($request))
-            ->when($request->query('group'), fn ($q, $g) => $q->where('group', $g))
-            ->orderBy('group')->orderBy('sort')->orderByDesc('date')->get();
-
-        return ['data' => $docs->map(fn ($d) => Present::document($d))->values(), 'groups' => $docs->pluck('group')->filter()->unique()->values()];
     }
 
     public function search(Request $request)
     {
         $l = $this->locale($request);
-        $term = trim((string) $request->query('q'));
+        $term = trim((string) $request->query('query', $request->query('q', '')));
         if (mb_strlen($term) < 2) {
-            return ['posts' => [], 'pages' => []];
+            return ['data' => []];
         }
+        $posts = $this->match(Post::published()->where('locale', $l), ['title', 'body'], $term)
+            ->orderByDesc('published_at')->limit(30)->get()
+            ->map(fn (Post $p) => ['title' => $p->title, 'url' => $p->url(), 'date' => $p->published_at?->format('d.m.Y'), 'text' => $this->snippet($p->body, $term)]);
+        $pages = $this->match(Page::published()->where('locale', $l), ['title', 'body'], $term)->limit(20)->get()
+            ->map(fn (Page $p) => ['title' => $p->title, 'url' => $p->url(), 'date' => null, 'text' => $this->snippet($p->body, $term)]);
+        $docs = $this->match(Document::published()->where('locale', $l), ['title', 'number'], $term)->limit(20)->get()
+            ->map(fn (Document $d) => ['title' => $d->title, 'url' => $d->urlPath(), 'date' => $d->date?->format('d.m.Y'), 'text' => null]);
 
-        return [
-            'posts' => $this->match($this->posts($l), ['title', 'excerpt', 'body'], $term)->limit(20)->get()->map(fn ($p) => Present::postCard($p)),
-            'pages' => $this->match(Page::published()->where('locale', $l), ['title', 'body'], $term)->limit(20)->get()->map(fn ($p) => Present::pageLink($p)),
-        ];
+        return ['data' => $pages->concat($posts)->concat($docs)->values()];
     }
 
     public function sitemap()
     {
-        return [
-            'pages' => Page::published()->get()->map(fn ($p) => ['url' => $p->url(), 'updated_at' => $p->updated_at?->toAtomString()]),
-            'posts' => Post::published()->get()->map(fn ($p) => ['url' => $p->url(), 'updated_at' => $p->updated_at?->toAtomString()]),
-        ];
+        $item = fn ($url, $at) => ['url' => $url, 'updated_at' => $at?->toAtomString()];
+
+        return ['data' => Page::published()->get()->map(fn ($p) => $item($p->url(), $p->updated_at))
+            ->concat(Post::published()->get()->map(fn ($p) => $item($p->url(), $p->updated_at)))
+            ->concat(Document::published()->get()->map(fn ($d) => $item($d->urlPath(), $d->updated_at)))
+            ->values()];
+    }
+
+    private function snippet(?string $html, string $term): ?string
+    {
+        $text = trim(preg_replace('/\s+/u', ' ', html_entity_decode(strip_tags(preg_replace(['~<(script|style)\b.*?</\1>~is', '~<[^>]+>~'], ['', '$0 '], (string) $html)))));
+        $pos = mb_stripos($text, $term);
+        if ($text === '' || $pos === false) {
+            return $text !== '' ? mb_substr($text, 0, 200) : null;
+        }
+
+        return ($pos > 80 ? '…' : '').mb_substr($text, max(0, $pos - 80), 220).'…';
     }
 
     // ilike у PostgreSQL; у SQLite (тести, локально) like не знає регістру кирилиці, тож шукаємо і з великої літери

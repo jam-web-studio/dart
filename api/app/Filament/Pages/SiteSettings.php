@@ -5,6 +5,8 @@ namespace App\Filament\Pages;
 use App\Models\Setting;
 use BackedEnum;
 use Filament\Actions\Action;
+use Filament\Forms\Components\CodeEditor;
+use Filament\Forms\Components\CodeEditor\Enums\Language;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Notification;
@@ -27,9 +29,19 @@ class SiteSettings extends Page
 
     public ?array $data = [];
 
+    private const HTML = [
+        'layout_header' => 'Шапка (меню)',
+        'layout_footer' => 'Підвал',
+        'layout_accessibility' => 'Віджет доступності',
+        'template_post' => 'Шаблон новини (/blog/…)',
+        'template_order' => 'Шаблон наказу (/orders/…)',
+        'template_report' => 'Шаблон звіту (/reports/…)',
+    ];
+
     public function mount(): void
     {
-        $this->form->fill(Setting::publicAll());
+        $keys = [...array_keys(Setting::DEFAULTS), ...array_keys(self::HTML)];
+        $this->form->fill(collect($keys)->mapWithKeys(fn ($k) => [$k => Setting::get($k)])->all());
     }
 
     public function form(Schema $schema): Schema
@@ -38,24 +50,13 @@ class SiteSettings extends Page
             Section::make('Відомство')->columns(2)->schema([
                 TextInput::make('site_name')->label('Назва (укр.)'),
                 TextInput::make('site_name_en')->label('Назва (англ.)'),
-                TextInput::make('phone')->label('Телефон'),
-                TextInput::make('email')->label('Email')->email(),
-                TextInput::make('address')->label('Адреса (укр.)'),
-                TextInput::make('address_en')->label('Адреса (англ.)'),
-                Textarea::make('footer_text')->label('Текст у підвалі')->rows(2)->columnSpanFull(),
+                Textarea::make('meta_description')->label('Опис сайту для пошукових систем')->rows(2)->columnSpanFull(),
+                TextInput::make('og_image')->label('Картинка для соцмереж (URL)')->url()->columnSpanFull(),
             ]),
-            Section::make('Головна')->schema([
-                TextInput::make('hero_title')->label('Заголовок'),
-                Textarea::make('hero_text')->label('Підзаголовок')->rows(2),
-                TextInput::make('hero_image')->label('Фонове фото (URL)'),
-            ]),
-            Section::make('Соцмережі')->columns(2)->schema([
-                TextInput::make('facebook')->label('Facebook')->url(),
-                TextInput::make('instagram')->label('Instagram')->url(),
-                TextInput::make('youtube')->label('YouTube')->url(),
-                TextInput::make('telegram')->label('Telegram')->url(),
-                TextInput::make('twitter')->label('X / Twitter')->url(),
-            ]),
+            Section::make('Шапка, підвал і шаблони')
+                ->description('HTML старого сайту (Webflow). У шаблонах записів: {{title}}, {{date|d.m.Y}}, {{cover}}, {{{body}}}, {{{gallery}}}, {{number}}, {{pdf}}.')
+                ->collapsed()
+                ->schema(collect(self::HTML)->map(fn ($label, $key) => CodeEditor::make($key)->label($label)->language(Language::Html))->values()->all()),
         ]);
     }
 

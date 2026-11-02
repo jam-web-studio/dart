@@ -2,6 +2,7 @@
 
 namespace App\Filament\Support;
 
+use App\Models\Document;
 use App\Models\Page;
 use App\Models\Post;
 use Filament\Actions\Action;
@@ -28,6 +29,7 @@ trait RecordActions
     {
         $path = match (true) {
             $r instanceof Post, $r instanceof Page => $r->url(),
+            $r instanceof Document => $r->urlPath(),
             default => null,
         };
 
