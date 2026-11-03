@@ -35,6 +35,10 @@ $C restart tg-web
 # site block for the museum portal's Caddy, then reload it (no downtime for the other sites)
 mkdir -p /opt/caddy-sites
 sed "s|TG_DOMAIN|$DOMAIN|" deploy/tourism-gov.caddy > /opt/caddy-sites/tourism-gov.caddy
+# former addresses of the site redirect to the current DOMAIN
+for OLD in dart.emuseum.ua; do
+  [ "$OLD" = "$DOMAIN" ] || printf '\n%s {\n\tredir https://%s{uri} permanent\n}\n' "$OLD" "$DOMAIN" >> /opt/caddy-sites/tourism-gov.caddy
+done
 CADDY="$(docker ps -qf label=com.docker.compose.project=mincult -f label=com.docker.compose.service=caddy | head -1)"
 if [ -n "$CADDY" ] && docker exec "$CADDY" test -f /etc/caddy/sites/tourism-gov.caddy; then
   # a broken site block must not take down the other sites behind this Caddy: validate first, roll back on error
