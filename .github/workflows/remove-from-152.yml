@@ -1,0 +1,86 @@
+# Разове видалення tourism.gov.ua (dart.discover.ua) зі старого спільного сервера (78.27.234.152) після переїзду на сервер Jam.
+# Запускати лише після перевірки сайту на новому сервері, перемикання DNS і дозволу Дмитра.
+# Чіпає лише своє: compose-проєкт tourism-gov (контейнери, томи, образи), /opt/tourism-gov і блок /opt/caddy-sites/tourism-gov.caddy.
+# Спільний Caddy перезавантажується лише після `caddy validate`; не пройшло — блок повертається.
+# Перед видаленням — остання копія бази PostgreSQL у /root/backups на старому сервері (без неї нічого не видаляється).
+name: Remove from 152
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Для підтвердження введіть tourism-gov
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  remove:
+    runs-on: ubuntu-latest
+    env:
+      OLD: '78.27.234.152'
+    steps:
+      - name: Confirm
+        env:
+          OLD_KEY: ${{ secrets.OLD_SSH_KEY || secrets.DEPLOY_SSH_KEY }}
+        run: |
+          [ "${{ inputs.confirm }}" = "tourism-gov" ] || { echo "::error::Введіть tourism-gov у поле confirm"; exit 1; }
+          [ -n "$OLD_KEY" ] || { echo "::error::Немає ключа старого сервера"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$OLD_KEY" | tr -d '\r' > ~/.ssh/old && chmod 600 ~/.ssh/old
+          ssh-keyscan "$OLD" >> ~/.ssh/known_hosts 2>/dev/null
+          echo "old: $(ssh -i ~/.ssh/old root@$OLD hostname)"
+
+      - name: Remove
+        # Скрипт передаємо файлом: docker compose читає stdin і «з'їдає» решту скрипту
+        run: |
+          cat > remove.sh <<'REMOTE'
+          set -e
+          C='docker compose -p tourism-gov -f docker-compose.yml -f docker-compose.prod.yml'
+          mkdir -p /root/backups
+          if [ -d /opt/tourism-gov ]; then
+            cd /opt/tourism-gov
+            if docker ps --format '{{.Names}}' | grep -q '^tourism-gov-tg-db'; then
+              $C exec -T tg-db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' </dev/null | gzip -1 > "/root/backups/tourism-gov-final-$(date +%Y%m%d%H%M).sql.gz"
+              last="$(ls -t /root/backups/tourism-gov-final-*.sql.gz | head -1)"
+              ls -la "$last"
+              [ "$(stat -c %s "$last")" -gt 5000 ] || { echo "::error::Копія бази підозріло мала — нічого не видаляю"; exit 1; }
+            else
+              ls /root/backups/tourism-gov-final-*.sql.gz >/dev/null 2>&1 || { echo "::error::База не запущена і копії немає — нічого не видаляю"; exit 1; }
+            fi
+            # завантажені файли — теж у копію (на новому сервері вони вже є)
+            $C exec -T tg-app sh -c 'cd storage/app && tar -cf - --exclude=./private/livewire-tmp --exclude=./livewire-tmp .' </dev/null | gzip -1 > "/root/backups/tourism-gov-storage-$(date +%Y%m%d%H%M).tar.gz" || true
+            $C down -v --remove-orphans </dev/null || true
+          fi
+          for c in $(docker ps -aq -f label=com.docker.compose.project=tourism-gov); do docker rm -f "$c"; done
+          for v in $(docker volume ls -q -f label=com.docker.compose.project=tourism-gov); do docker volume rm "$v"; done
+          docker rmi -f tourism-gov-app:latest tourism-gov-web:latest 2>/dev/null || true
+
+          SITE=/opt/caddy-sites/tourism-gov.caddy
+          if [ -f "$SITE" ]; then
+            CADDY="$(docker ps -qf label=com.docker.compose.project=mincult -f label=com.docker.compose.service=caddy | head -1)"
+            [ -n "$CADDY" ] || { echo "::error::Не знайдено Caddy порталу"; exit 1; }
+            mv "$SITE" /root/backups/tourism-gov.caddy.removed
+            rm -f "$SITE".bak-*
+            if docker exec "$CADDY" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+              docker exec "$CADDY" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+              echo "Caddy: блок tourism-gov.caddy прибрано"
+            else
+              cp /root/backups/tourism-gov.caddy.removed "$SITE"
+              echo "::error::caddy validate не пройшов — блок повернуто, Caddy не чіпав"
+              exit 1
+            fi
+          fi
+
+          rm -rf /opt/tourism-gov
+          echo "Лишилось від tourism-gov:"
+          docker ps -a --format '{{.Names}}' | grep -E '^tourism-gov-' || echo "  контейнерів немає"
+          docker volume ls -q | grep -E '^tourism-gov_' || echo "  томів немає"
+          ls -d /opt/tourism-gov 2>/dev/null || echo "  /opt/tourism-gov немає"
+          ls /opt/caddy-sites/tourism-gov.caddy 2>/dev/null || echo "  tourism-gov.caddy немає"
+          ls -la /root/backups/tourism-gov-* 
+          df -h / | tail -1
+          REMOTE
+          scp -i ~/.ssh/old remove.sh root@$OLD:/root/remove-tourism-gov.sh
+          ssh -i ~/.ssh/old root@$OLD 'bash /root/remove-tourism-gov.sh </dev/null; rc=$?; rm -f /root/remove-tourism-gov.sh; exit $rc'
