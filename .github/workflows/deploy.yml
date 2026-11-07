@@ -1,94 +1,138 @@
-# Deploys «Державне агентство розвитку туризму України» to the live server on every push to main (and by hand from the Actions tab).
-# Repository secrets (DEPLOY_HOST, DEPLOY_USER, DEPLOY_PORT and DOMAIN may also be repository variables):
-# DEPLOY_HOST, DEPLOY_USER (e.g. root), DEPLOY_SSH_KEY (private key), DOMAIN, ADMIN_EMAIL (optional,
-# default admin@tourism.gov.ua) and ADMIN_PASSWORD (administrator, created on the first deploy), optional DEPLOY_PORT.
+# Деплой «Державне агентство розвитку туризму України» на сервер Jam (78.27.234.124: nginx + pm2 + PHP 8.4-FPM + MySQL 8, без Docker).
+# Лише вручну: Actions → Deploy → Run workflow. Сайт на сервері один раз створює server/add-dart.sh (від root),
+# дані зі старого сервера переносить «Migrate from 152».
+# Secrets: JAM_SSH_KEY (або SSH_KEY) — приватний ключ deploy@сервер Jam (gh_actions_jam, той самий, що в X-Park і CRM);
+#          ADMIN_PASSWORD (адміністратор, створюється один раз), ADMIN_EMAIL (необов'язково, admin@tourism.gov.ua).
+# На сервері: /var/www/<APP_NAME>/{ecosystem.config.cjs, web (Next.js standalone), backend (= api/ з репозиторію)}.
 name: Deploy
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
-concurrency: deploy
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-dart
+  cancel-in-progress: false
+
+env:
+  SSH_HOST: ${{ vars.SSH_HOST || '78.27.234.124' }}
+  SSH_USER: deploy
+  APP_NAME: ${{ vars.APP_NAME || 'dart' }}
+  SITE_DOMAIN: ${{ vars.SITE_DOMAIN || 'dart.discover.ua' }}
 
 jobs:
   test:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: api } }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: shivammathur/setup-php@v2
-        with: { php-version: '8.3', extensions: 'intl, zip, gd, pdo_sqlite', coverage: none }
+        with: { php-version: '8.4', extensions: 'intl, zip, gd, pdo_sqlite', coverage: none }
       - run: composer install --no-interaction --prefer-dist --no-progress
       - run: cp .env.example .env && php artisan key:generate
       - run: vendor/bin/pint --test
       - run: php artisan test
 
+  # API першим: нові поля мають бути в базі до того, як їх попросить сайт
+  api:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: SSH-ключ
+        env:
+          KEY: ${{ secrets.JAM_SSH_KEY || secrets.SSH_KEY }}
+        run: |
+          [ -n "$KEY" ] || { echo "::error::Секрет JAM_SSH_KEY порожній (Settings → Secrets → Actions)"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" | tr -d '\r' > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/deploy_key "$SSH_USER@$SSH_HOST" "command -v php >/dev/null && test -f /var/www/$APP_NAME/backend/.env" \
+            || { echo "::error::На сервері немає PHP або /var/www/$APP_NAME/backend/.env — спершу server/add-dart.sh"; exit 1; }
+      # .env, storage/, vendor/, bootstrap/cache і зібрані ресурси Filament на сервері не чіпаємо
+      - name: Викласти код
+        run: |
+          rsync -az --delete -e "ssh -i ~/.ssh/deploy_key" \
+            --exclude=/.env --exclude=/storage/ --exclude=/vendor/ --exclude=/node_modules/ \
+            --exclude=/bootstrap/cache/ --exclude=/database/database.sqlite --exclude=/public/storage \
+            --exclude=/public/css/filament/ --exclude=/public/js/filament/ --exclude=/public/fonts/filament/ \
+            --exclude=/docker/ --exclude=/Dockerfile \
+            api/ "$SSH_USER@$SSH_HOST:/var/www/$APP_NAME/backend/"
+      - name: Пароль адміністратора
+        env:
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: |
+          printf '%s' "$ADMIN_PASSWORD" | ssh -i ~/.ssh/deploy_key "$SSH_USER@$SSH_HOST" "umask 077 && cat > /var/www/$APP_NAME/.admin-password"
+      - name: Залежності, міграції, імпорт, кеш
+        env:
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL || 'admin@tourism.gov.ua' }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$SSH_USER@$SSH_HOST" "APP_NAME=$APP_NAME SITE_DOMAIN=$SITE_DOMAIN ADMIN_EMAIL=$(printf '%q' "$ADMIN_EMAIL") bash -s" <<'SH'
+          set -euo pipefail
+          cd /var/www/$APP_NAME/backend
+          setenv() { grep -q "^$1=" .env && sed -i "s|^$1=.*|$1=$2|" .env || echo "$1=$2" >> .env; }
+          setenv APP_URL "https://$SITE_DOMAIN"
+          setenv FILESYSTEM_DISK public
+          setenv SESSION_LIFETIME 480
+          # черги на цьому сервері немає (воркер не запущено): завдання виконуються одразу
+          setenv QUEUE_CONNECTION sync
+          composer install --no-dev --optimize-autoloader --no-interaction --no-progress </dev/null
+          php artisan filament:assets </dev/null
+          php artisan migrate --force </dev/null
+          php artisan storage:link --force </dev/null || true
+          # адміністратор з ADMIN_EMAIL / ADMIN_PASSWORD (створюється один раз, пароль потім не міняється)
+          PW="$(cat ../.admin-password 2>/dev/null || true)"; rm -f ../.admin-password
+          [ -n "$PW" ] && { ADMIN_PASSWORD="$PW" php artisan site:admin "$ADMIN_EMAIL" </dev/null || echo "::warning::site:admin"; }
+          # знімок tourism.gov.ua: імпорт лише коли змінився (додає відсутнє, відредаговане в адмінці не чіпає).
+          # Позначка .imported-* переїжджає зі storage старого сервера, тож після переїзду імпорт не повторюється.
+          sum="$(cat database/seed-data/*.json 2>/dev/null | md5sum | cut -c1-12)"
+          if ls database/seed-data/*.json >/dev/null 2>&1 && [ ! -f "storage/app/.imported-$sum" ]; then
+            nice -n 10 php artisan site:import >> storage/logs/import.log 2>&1 </dev/null && touch "storage/app/.imported-$sum"
+            tail -3 storage/logs/import.log
+          fi
+          php artisan optimize:clear </dev/null
+          php artisan optimize </dev/null
+          php artisan filament:optimize </dev/null || true
+          sudo systemctl reload php8.4-fpm
+          SH
+
   web:
+    needs: api
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: web } }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with: { node-version: '22', cache: npm, cache-dependency-path: web/package-lock.json }
+      # збираємо на GitHub, не на сервері
       - run: npm ci
       - run: npx tsc --noEmit
-
-  deploy:
-    needs: [test, web]
-    runs-on: ubuntu-latest
-    env:
-      HOST: ${{ secrets.DEPLOY_HOST || vars.DEPLOY_HOST }}
-      USER: ${{ secrets.DEPLOY_USER || vars.DEPLOY_USER || 'root' }}
-      PORT: ${{ secrets.DEPLOY_PORT || vars.DEPLOY_PORT || '22' }}
-      DOMAIN: ${{ secrets.DOMAIN || vars.DOMAIN }}
-      HAS_KEY: ${{ secrets.DEPLOY_SSH_KEY != '' }}
-    steps:
-      - name: Check secrets
-        id: check
+      - run: npm run build
+        env: { NEXT_TELEMETRY_DISABLED: '1' }
+      - name: Зібрати standalone
         run: |
-          for v in HOST DOMAIN; do [ -n "$(printenv $v)" ] && echo "$v: set" || echo "$v: MISSING"; done
-          echo "DEPLOY_SSH_KEY set: $HAS_KEY"
-          echo "ADMIN_PASSWORD set: ${{ secrets.ADMIN_PASSWORD != '' }}"
-          if [ -z "$HOST" ] || [ -z "$DOMAIN" ] || [ "$HAS_KEY" != true ]; then
-            echo "::warning::DEPLOY_HOST, DOMAIN or DEPLOY_SSH_KEY is not set, skipping deploy"; echo "go=0" >> "$GITHUB_OUTPUT"
-          else echo "go=1" >> "$GITHUB_OUTPUT"; fi
-
-      - uses: actions/checkout@v4
-        if: steps.check.outputs.go == '1'
-
-      # Images are built here, not on the shared VPS: image builds there ran it out of memory and froze every site on it.
-      - name: Build images
-        if: steps.check.outputs.go == '1'
-        run: |
-          docker build -t tourism-gov-app:latest ./api
-          docker build -t tourism-gov-web:latest ./web
-          docker save tourism-gov-app:latest tourism-gov-web:latest | gzip -1 > /tmp/images.tar.gz
-          ls -lh /tmp/images.tar.gz
-
-      - name: SSH key
-        if: steps.check.outputs.go == '1'
+          cp -r .next/static .next/standalone/.next/static
+          cp -r public .next/standalone/public
+      - name: SSH-ключ
         run: |
           install -m 700 -d ~/.ssh
-          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" | tr -d '\r' > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
-          ssh-keygen -lf ~/.ssh/id_deploy >/dev/null || echo "::error::DEPLOY_SSH_KEY is not a valid private key"
-          ssh-keyscan -p "$PORT" "$HOST" >> ~/.ssh/known_hosts
-
-      - name: Upload code
-        if: steps.check.outputs.go == '1'
+          printf '%s\n' "${{ secrets.JAM_SSH_KEY || secrets.SSH_KEY }}" | tr -d '\r' > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+      - name: Викласти збірку
         run: |
-          ssh -o ServerAliveInterval=30 -i ~/.ssh/id_deploy -p "$PORT" "$USER@$HOST" 'mkdir -p /opt/tourism-gov && command -v rsync >/dev/null || (apt-get update -qq && apt-get install -y -qq rsync)'
-          rsync -az --delete -e "ssh -o ServerAliveInterval=30 -i ~/.ssh/id_deploy -p $PORT" \
-            --exclude .git --exclude /.env --exclude api/.env \
-            ./ "$USER@$HOST:/opt/tourism-gov/"
-
-      - name: Upload images
-        if: steps.check.outputs.go == '1'
+          ssh -i ~/.ssh/deploy_key "$SSH_USER@$SSH_HOST" "mkdir -p /var/www/$APP_NAME/web"
+          rsync -az --delete -e "ssh -i ~/.ssh/deploy_key" .next/standalone/ "$SSH_USER@$SSH_HOST:/var/www/$APP_NAME/web/"
+          rsync -az -e "ssh -i ~/.ssh/deploy_key" ../ecosystem.config.cjs "$SSH_USER@$SSH_HOST:/var/www/$APP_NAME/"
+      - name: Перезапустити
         run: |
-          ssh -o ServerAliveInterval=30 -i ~/.ssh/id_deploy -p "$PORT" "$USER@$HOST" 'gunzip | docker load' < /tmp/images.tar.gz
-
-      - name: Start
-        if: steps.check.outputs.go == '1'
+          ssh -i ~/.ssh/deploy_key "$SSH_USER@$SSH_HOST" "cd /var/www/$APP_NAME && SITE_DOMAIN=$SITE_DOMAIN pm2 startOrReload ecosystem.config.cjs --update-env && pm2 save"
+      # Перевірка на самому сервері (працює й до перемикання DNS): головна, API, адмінка
+      - name: Перевірка
         run: |
-          ssh -o ServerAliveInterval=30 -i ~/.ssh/id_deploy -p "$PORT" "$USER@$HOST" \
-            "PREBUILT=1 DOMAIN='$DOMAIN' ADMIN_EMAIL='${{ secrets.ADMIN_EMAIL }}' ADMIN_PASSWORD='${{ secrets.ADMIN_PASSWORD }}' sh /opt/tourism-gov/deploy/remote.sh"
+          ssh -i ~/.ssh/deploy_key "$SSH_USER@$SSH_HOST" "D=$SITE_DOMAIN; for i in \$(seq 1 12); do
+              r() { curl -sk -o /dev/null -w '%{http_code}' -L --resolve \$D:80:127.0.0.1 --resolve \$D:443:127.0.0.1 http://\$D\$1; }
+              h=\$(r /); a=\$(r /api/v1/layout); n=\$(r /news-and-announcements); m=\$(r /admin/login)
+              echo \"спроба \$i: / -> \$h, /api/v1/layout -> \$a, /news-and-announcements -> \$n, /admin/login -> \$m\"
+              [ \"\$h\" = 200 ] && [ \"\$a\" = 200 ] && [ \"\$m\" = 200 ] && exit 0; sleep 5; done; pm2 logs $APP_NAME --lines 30 --nostream; exit 1"

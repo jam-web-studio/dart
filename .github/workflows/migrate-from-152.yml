@@ -1,0 +1,122 @@
+# Разовий переїзд tourism.gov.ua (ДАРТ) зі спільного VPS (Docker, 78.27.234.152, /opt/tourism-gov, PostgreSQL) на сервер Jam
+# (/var/www/dart, MySQL). Старий сервер лише читається: api/.env (APP_KEY), дані бази й storage/app (завантажені файли, позначка імпорту).
+# Порядок: server/add-dart.sh → Deploy (код і порожня схема MySQL) → цей workflow → перевірка → DNS.
+# Перед запуском — слот у координатора (VPS спільний).
+# Секрети: DEPLOY_SSH_KEY (root@старий, уже є з Docker-деплою), JAM_SSH_KEY або SSH_KEY (deploy@новий).
+# База PostgreSQL → MySQL переноситься даними (deploy/db-transfer.php): схему створюють міграції, таблиці очищаються
+# й заповнюються наново, тож повторний запуск з what=db перед перемиканням DNS переносить свіжі зміни.
+name: Migrate from 152
+
+on:
+  workflow_dispatch:
+    inputs:
+      old_host:
+        description: 'Старий сервер (root, порт 22)'
+        default: '78.27.234.152'
+      what:
+        description: 'all — .env, база й файли; db — лише база; files — лише файли; env — лише .env'
+        type: choice
+        options: [all, db, files, env]
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-dart
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    env:
+      OLD: ${{ inputs.old_host }}
+      NEW: ${{ vars.SSH_HOST || '78.27.234.124' }}
+      NEW_USER: deploy
+      APP: ${{ vars.APP_NAME || 'dart' }}
+      C: cd /opt/tourism-gov && docker compose -p tourism-gov -f docker-compose.yml -f docker-compose.prod.yml
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Keys
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.OLD_SSH_KEY || secrets.DEPLOY_SSH_KEY }}" | tr -d '\r' > ~/.ssh/old && chmod 600 ~/.ssh/old
+          printf '%s\n' "${{ secrets.JAM_SSH_KEY || secrets.SSH_KEY }}" | tr -d '\r' > ~/.ssh/new && chmod 600 ~/.ssh/new
+          ssh-keygen -lf ~/.ssh/old >/dev/null || { echo "::error::Секрет DEPLOY_SSH_KEY (root старого сервера) порожній"; exit 1; }
+          ssh-keygen -lf ~/.ssh/new >/dev/null || { echo "::error::Секрет JAM_SSH_KEY (deploy@сервер Jam) порожній"; exit 1; }
+          ssh-keyscan "$OLD" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan "$NEW" >> ~/.ssh/known_hosts 2>/dev/null
+          echo "old: $(ssh -i ~/.ssh/old root@$OLD hostname)"; echo "new: $(ssh -i ~/.ssh/new $NEW_USER@$NEW hostname)"
+          ssh -i ~/.ssh/new $NEW_USER@$NEW "test -f /var/www/$APP/backend/.env" || { echo "::error::На новому сервері немає /var/www/$APP/backend/.env — спершу server/add-dart.sh"; exit 1; }
+
+      # APP_KEY і решта ключів старого api/.env → новий .env. Підключення до бази, черга, адреса лишаються новими.
+      - name: .env
+        if: inputs.what == 'all' || inputs.what == 'env'
+        run: |
+          ssh -i ~/.ssh/old root@$OLD 'cat /opt/tourism-gov/api/.env' > old.env
+          echo "ключів у старому .env: $(grep -c '^[A-Z_0-9]*=' old.env)"
+          cat > merge-env.sh <<'SH'
+          set -eu
+          cd "/var/www/$1/backend"
+          cp -p .env .env.before-migrate
+          while IFS= read -r line; do
+            k="${line%%=*}"
+            [[ "$k" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
+            case "$k" in DB_*|REDIS_*|QUEUE_CONNECTION|APP_ENV|APP_DEBUG|APP_URL|LOG_*) continue ;; esac
+            grep -v "^$k=" .env > .env.tmp || true
+            printf '%s\n' "$line" >> .env.tmp
+            mv .env.tmp .env
+          done
+          chmod 600 .env
+          echo "ключів у новому .env: $(grep -c '^[A-Z_0-9]*=' .env)"
+          SH
+          scp -i ~/.ssh/new merge-env.sh $NEW_USER@$NEW:/tmp/merge-env-$APP.sh
+          ssh -i ~/.ssh/new $NEW_USER@$NEW "bash /tmp/merge-env-$APP.sh $APP; rm -f /tmp/merge-env-$APP.sh" < old.env
+          rm -f old.env
+
+      # Дані PostgreSQL (контейнер tg-app бачить базу tg-db) → JSON-рядки → MySQL нового сайту
+      - name: Database
+        if: inputs.what == 'all' || inputs.what == 'db'
+        run: |
+          scp -i ~/.ssh/old deploy/db-transfer.php root@$OLD:/tmp/db-transfer-$APP.php
+          cat > export.sh <<SH
+          set -e
+          $C cp /tmp/db-transfer-$APP.php tg-app:/tmp/db-transfer.php </dev/null
+          rm -f /tmp/db-transfer-$APP.php
+          $C exec -T tg-app nice -n 19 php /tmp/db-transfer.php export </dev/null
+          SH
+          scp -i ~/.ssh/old export.sh root@$OLD:/tmp/export-$APP.sh
+          ssh -i ~/.ssh/old root@$OLD "bash /tmp/export-$APP.sh; rc=\$?; rm -f /tmp/export-$APP.sh; exit \$rc" 2> export.log | gzip -1 > dump.jsonl.gz
+          cat export.log; ls -la dump.jsonl.gz
+          [ "$(gunzip -c dump.jsonl.gz | grep -c '^{"table"')" -gt 3 ] || { echo "::error::Дамп порожній"; exit 1; }
+          scp -i ~/.ssh/new deploy/db-transfer.php $NEW_USER@$NEW:/tmp/db-transfer-$APP.php
+          ssh -i ~/.ssh/new $NEW_USER@$NEW "cd /var/www/$APP/backend && test -d vendor || { echo '::error::Код ще не викладено: спершу Deploy'; exit 1; }
+            php artisan migrate --force && gunzip | php /tmp/db-transfer-$APP.php import; rc=\$?; rm -f /tmp/db-transfer-$APP.php
+            php artisan optimize:clear >/dev/null && php artisan optimize >/dev/null && sudo systemctl reload php8.4-fpm && (pm2 restart $APP --update-env >/dev/null 2>&1 || true)
+            exit \$rc" < dump.jsonl.gz
+
+      # storage/app старого контейнера (завантажені файли на диску public, позначка імпорту .imported-*) → storage/app нового сайту
+      - name: Files
+        if: inputs.what == 'all' || inputs.what == 'files'
+        run: |
+          cat > files.sh <<SH
+          $C exec -T tg-app sh -c 'du -sh storage/app >&2; cd storage/app && nice -n 19 tar -cf - --exclude=./private/livewire-tmp --exclude=./livewire-tmp .' </dev/null
+          SH
+          scp -i ~/.ssh/old files.sh root@$OLD:/tmp/files-$APP.sh
+          ssh -i ~/.ssh/old root@$OLD "bash /tmp/files-$APP.sh; rc=\$?; rm -f /tmp/files-$APP.sh; exit \$rc" > storage.tar 2> storage.err || { cat storage.err; exit 1; }
+          cat storage.err; ls -la storage.tar
+          gzip -1 storage.tar
+          ssh -i ~/.ssh/new $NEW_USER@$NEW "mkdir -p /var/www/$APP/backend/storage/app && cd /var/www/$APP/backend/storage/app && gunzip | tar -xf - --no-same-owner && du -sh . && ls -a public | head" < storage.tar.gz
+          ssh -i ~/.ssh/new $NEW_USER@$NEW "cd /var/www/$APP/backend && test -f artisan && php artisan storage:link --force || true"
+
+      - name: Check
+        run: |
+          cat > count.php <<'PHP'
+          <?php
+          require 'vendor/autoload.php';
+          $app = require 'bootstrap/app.php';
+          $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+          echo App\Models\Page::count(), " сторінок, ", App\Models\Post::count(), " новин, ", App\Models\Document::count(), " документів, ", App\Models\User::count(), " користувачів\n";
+          PHP
+          ssh -i ~/.ssh/new $NEW_USER@$NEW "cd /var/www/$APP/backend && php -- " < count.php || true
